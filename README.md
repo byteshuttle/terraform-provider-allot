@@ -17,11 +17,13 @@ selects a live allocation with `SPACE_KEY/UUID`.
 
 ## Local development
 
-Prerequisites are Go 1.26 or later, Terraform, and the sibling `allot` checkout
-selected by the parent `go.work`. The core has no release tag yet: `v0.0.0` is a
-local development dependency resolved by that workspace. Pin a published core
-version before publishing the provider. No sibling replacement path is stored
-in this repository's `go.mod`.
+Prerequisites are Go 1.26 or later and Terraform. The provider pins the released
+`github.com/byteshuttle/allot v0.1.0` module and builds independently of the core
+checkout. CI sets `GOWORK=off` to verify that released dependency.
+
+The optional parent `go.work` selects the sibling core for joint development.
+Use `GOWORK=off` when checking the pinned version locally; no sibling replacement
+path is stored in this repository's `go.mod`.
 
 From this repository:
 
