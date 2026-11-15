@@ -1,0 +1,72 @@
+---
+page_title: "allot_claim"
+description: |-
+  Capacity claimed within a parent allocation.
+---
+
+# allot_claim
+
+Claims capacity within a root or child allocation, inheriting its domain.
+
+```hcl
+resource "allot_claim" "lan" {
+  within = allot_space.home.ref
+  key    = "lan"
+  cidr   = "10.0.0.0/24"
+}
+
+resource "allot_claim" "dhcp" {
+  within = allot_claim.lan.ref
+  key    = "lan/dhcp"
+  range = {
+    start_offset = 2
+    end_offset   = -2
+  }
+}
+
+resource "allot_claim" "printer" {
+  within = allot_claim.dhcp.ref
+  key    = "lan/printer"
+  value  = "10.0.0.150"
+}
+```
+
+`within` is a required parent reference with `space_key`, `space_id` and `id`.
+Use a resource's `.ref` output. `key` is a required logical name unique across
+the whole root space; it is independent of parentage and does not replace UUID
+identity.
+
+Configure at most one selector. With none, select one available value:
+
+| Selector | Behavior |
+| --- | --- |
+| `value` | Exact IP address or integer, accepted as a string |
+| `cidr` | Exact aligned IP prefix |
+| `offset` | One relative value, zero-based; negative offsets count from the end |
+| `range` | Inclusive `start`/`end` or `start_offset`/`end_offset` pair |
+| `request` | Automatic selection: optional `count` or `prefix_length` |
+
+`request.kind` is inferred as `value`, `range` or `prefix`; if configured, it must
+match the selected request. Omit both count and prefix length for a singleton.
+Automatic selection happens during apply and persists the concrete allocation.
+
+Outputs are `id`, `ref`, and `result`. Use `result.value` for an automatically
+selected address or ID, `result.cidr` for a selected IP prefix, and `result.start`
+and `result.end` for any interval. Input selectors remain the original request.
+
+Changing the key, parent or selector requires replacement with a fresh UUID.
+Release is UUID-specific and fails if the allocation still has children. With a
+delegated DHCP range, DHCP bindings and exclusions remain the network consumer's
+responsibility; the allocator does not track live leases.
+
+```sh
+terraform import allot_claim.printer 'home/ipv4/ALLOCATION_UUID'
+```
+
+Import reads the stored parent and selector. A root UUID belongs to `allot_space`,
+not this resource. Import is an explicit ownership decision, not a name-based
+search or automatic adoption.
+
+## Schema
+
+{{ .SchemaMarkdown | trimspace }}

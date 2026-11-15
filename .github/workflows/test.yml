@@ -1,0 +1,102 @@
+name: Tests
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: ./.github/actions/setup-core
+        with:
+          core-ref: ${{ vars.ALLOT_CORE_REF || 'main' }}
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: '1.17.2'
+          terraform_wrapper: false
+      - name: Check formatting
+        run: test -z "$(gofmt -l main.go internal)"
+      - run: make lint test build
+      - run: make generate
+      - name: Check generated documentation
+        run: git diff --exit-code -- docs examples go.mod go.sum
+      - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with:
+          version: v2.20.2
+          args: check
+  acceptance:
+    name: ${{ matrix.cli }} ${{ matrix.version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cli: terraform
+            version: '1.6.6'
+            host: registry.terraform.io
+          - cli: terraform
+            version: '1.17.2'
+            host: registry.terraform.io
+          - cli: tofu
+            version: '1.6.3'
+            host: registry.opentofu.org
+          - cli: tofu
+            version: '1.13.9'
+            host: registry.opentofu.org
+    env:
+      AWS_ACCESS_KEY_ID: allot-test
+      AWS_SECRET_ACCESS_KEY: allot-test-secret
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_EC2_METADATA_DISABLED: 'true'
+      ALLOT_TEST_S3_ENDPOINT: http://127.0.0.1:5000
+      ALLOT_TEST_S3_BUCKET: allot-integration
+      TF_ACC: '1'
+      TF_ACC_PROVIDER_NAMESPACE: byteshuttle
+      TF_ACC_PROVIDER_HOST: ${{ matrix.host }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: ./.github/actions/setup-core
+        with:
+          core-ref: ${{ vars.ALLOT_CORE_REF || 'main' }}
+      - if: matrix.cli == 'terraform'
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ matrix.version }}
+          terraform_wrapper: false
+      - if: matrix.cli == 'tofu'
+        uses: opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f # v1
+        with:
+          tofu_version: ${{ matrix.version }}
+          tofu_wrapper: false
+      - name: Select acceptance CLI
+        env:
+          CLI: ${{ matrix.cli }}
+        run: echo "TF_ACC_TERRAFORM_PATH=$(command -v "$CLI")" >> "$GITHUB_ENV"
+      - name: Start S3 fixture
+        run: |
+          python3 -m venv .local/moto
+          .local/moto/bin/pip install 'moto[server]==5.2.5'
+          .local/moto/bin/python .github/scripts/s3_fixture.py > .local/moto.log 2>&1 &
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:5000/ > /dev/null; then break; fi
+            sleep 1
+          done
+          .local/moto/bin/python - <<'PYTHON'
+          import boto3
+          boto3.client('s3', endpoint_url='http://127.0.0.1:5000').create_bucket(Bucket='allot-integration')
+          PYTHON
+      - run: go test -race -count=1 -timeout 20m ./...

@@ -1,0 +1,57 @@
+---
+page_title: "allot_space"
+description: |-
+  A root allocation space.
+---
+
+# allot_space
+
+A root IPv4, IPv6 or integer space with exclusive child allocations.
+
+```hcl
+resource "allot_space" "home" {
+  key  = "home/ipv4"
+  cidr = "10.0.0.0/8"
+}
+
+resource "allot_space" "vlans" {
+  key  = "fabric/home/vlan"
+  kind = "integer"
+  range = {
+    start = 1
+    end   = 4094
+  }
+}
+```
+
+| Argument | Behavior |
+| --- | --- |
+| `key` | Required exact logical space key, unique within the storage namespace |
+| `cidr` | Optional aligned IP prefix; infers kind and bounds |
+| `kind` | `ipv4`, `ipv6` or `integer`; required with explicit range, otherwise inferred |
+| `range` | Inclusive `start` and `end` strings; computed from CIDR when omitted |
+
+Configure CIDR or explicit bounds. If both are supplied they must agree. When
+explicit IP bounds form one CIDR, `cidr` is also computed. There are no implicit
+IPv4 network/broadcast exclusions. Integer bounds are nonnegative signed-64-bit
+values, represented as strings internally without floating-point conversion.
+
+Outputs are `id` (UUID), `ref` (parent reference for claims), and `result` with
+resolved `start`, `end`, optional singleton `value`, and optional IP `cidr`.
+
+Configuration changes require replacement. An existing same-name root with another
+UUID is a conflict; import it explicitly if this state should manage it. Releasing
+the root requires removing all children first. The ledger retains released UUID
+history even after Terraform removes the resource from state.
+
+```sh
+terraform import allot_space.home 'home/ipv4/ALLOCATION_UUID'
+```
+
+Use the selected live root's UUID. Import restores canonical bounds and kind;
+write canonical IP and integer representations in configuration to avoid a
+representation-only difference after import.
+
+## Schema
+
+{{ .SchemaMarkdown | trimspace }}

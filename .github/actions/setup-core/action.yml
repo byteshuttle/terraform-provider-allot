@@ -1,0 +1,28 @@
+name: Resolve Allot core
+description: Resolve the unpublished development core without modifying go.mod.
+inputs:
+  core-ref:
+    description: Core commit or ref used only while go.mod requires v0.0.0.
+    default: main
+runs:
+  using: composite
+  steps:
+    - id: dependency
+      shell: bash
+      run: |
+        version=$(go mod edit -json | python3 -c 'import json,sys; print(next(x["Version"] for x in json.load(sys.stdin)["Require"] if x["Path"] == "github.com/byteshuttle/allot"))')
+        echo "development=$([ "$version" = v0.0.0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+    - if: steps.dependency.outputs.development == 'true'
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        repository: byteshuttle/allot
+        ref: ${{ inputs.core-ref }}
+        path: .local/core
+        persist-credentials: false
+    - if: steps.dependency.outputs.development == 'true'
+      shell: bash
+      run: |
+        workspace="$GITHUB_WORKSPACE/.local/ci.work"
+        GOWORK="$workspace" go work init "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/.local/core"
+        GOWORK="$workspace" go work edit -replace="github.com/byteshuttle/allot@v0.0.0=$GITHUB_WORKSPACE/.local/core"
+        echo "GOWORK=$workspace" >> "$GITHUB_ENV"
