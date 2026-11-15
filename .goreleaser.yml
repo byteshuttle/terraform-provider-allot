@@ -18,6 +18,8 @@ checksum:
   extra_files:
     - glob: terraform-registry-manifest.json
       name_template: '{{ .ProjectName }}_{{ .Version }}_manifest.json'
+    - glob: signing-key.asc
+      name_template: signing-key.asc
 signs:
   - artifacts: checksum
     args:
@@ -33,5 +35,7 @@ release:
   extra_files:
     - glob: terraform-registry-manifest.json
       name_template: '{{ .ProjectName }}_{{ .Version }}_manifest.json'
+    - glob: signing-key.asc
+      name_template: signing-key.asc
 changelog:
   disable: true

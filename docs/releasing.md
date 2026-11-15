@@ -5,10 +5,21 @@ pull requests, and builds draft releases for `v*` tags.
 
 ## Prerequisites
 
-Configure repository Actions secrets `GPG_PRIVATE_KEY` (an ASCII-armored signing
-private key) and `PASSPHRASE` (its passphrase). Register the matching public key
-with the Terraform Registry. Provider installation still requires a GPG signature
-on the checksum file; [GitHub OIDC attestations do not replace that signature](https://developer.hashicorp.com/terraform/registry/providers/publishing).
+The dedicated provider signing key is published as [signing-key.asc](../signing-key.asc)
+and attached to releases. Its full fingerprint is:
+
+```text
+E671D56B52B1CA6F446A95330004DD2721D3F3F5
+```
+
+The key expires on 2028-11-14. Before expiry, extend it or rotate the key, update
+GitHub's `GPG_PRIVATE_KEY` and `PASSPHRASE` Actions secrets, and update the public
+key registered with the Terraform Registry. Keep a protected backup of the
+private key, passphrase and revocation certificate outside the repository.
+
+The release workflow reads those secrets to sign the checksum file. Register
+the public key and provider with the Terraform Registry before expecting Registry
+installation to work. [OIDC attestations do not replace that signature](https://developer.hashicorp.com/terraform/registry/providers/publishing).
 
 The release job also uses GitHub OIDC to create keyless provenance attestations
 for archives and checksums. It needs `id-token: write`, `attestations: write` and
@@ -64,9 +75,11 @@ matches the release you intended to install. A successful attestation establishe
 build provenance; it does not certify the code's behavior.
 
 To verify the Terraform Registry checksum signature, import the maintainer's
-verified public key and run:
+public key, check its fingerprint against the value above, and run:
 
 ```sh
+gpg --import signing-key.asc
+gpg --fingerprint E671D56B52B1CA6F446A95330004DD2721D3F3F5
 gpg --verify PROJECT_VERSION_SHA256SUMS.sig PROJECT_VERSION_SHA256SUMS
 sha256sum --check --ignore-missing PROJECT_VERSION_SHA256SUMS
 ```
