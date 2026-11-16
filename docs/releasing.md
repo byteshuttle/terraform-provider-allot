@@ -100,7 +100,8 @@ file includes `signing-key.asc`, dispatch the **Repair release checksums** workf
 with that release tag. It verifies the original signature, provenance and asset
 hashes, removes only the public-key entry, then signs and attests the corrected
 checksum file. Provider archives, their hashes and tags stay unchanged. The
-updated offline bundle retains the archive attestations.
+original offline bundle retains the archive attestations; the corrected checksum
+file has a separate `checksums-provenance.sigstore.json` bundle.
 
 ```sh
 gh workflow run repair-release-checksums.yml --repo byteshuttle/terraform-provider-allot -f tag=v0.1.1
