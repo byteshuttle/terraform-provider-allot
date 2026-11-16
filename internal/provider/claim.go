@@ -4,13 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/big"
+	"net/netip"
 
 	"github.com/byteshuttle/allot"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/objectplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
@@ -52,14 +53,14 @@ func (*claimResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *
 		"id":     schema.StringAttribute{Computed: true, Description: "Immutable allocation UUID.", PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()}},
 		"key":    schema.StringAttribute{Required: true, Description: "Logical name unique across the root space. Changes require replacement.", PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()}},
 		"within": refSchema(true),
-		"cidr":   schema.StringAttribute{Optional: true, Description: "Exact aligned IP prefix to claim.", PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()}},
-		"value":  schema.StringAttribute{Optional: true, Description: "Exact address or decimal integer to claim, as a string.", PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()}},
-		"offset": schema.Int64Attribute{Optional: true, Description: "Zero-based offset; negative values count from the end.", PlanModifiers: []planmodifier.Int64{int64planmodifier.RequiresReplace()}},
-		"range":  schema.SingleNestedAttribute{Optional: true, Description: "Inclusive start/end or start_offset/end_offset pair.", Attributes: rangeAttrs, PlanModifiers: []planmodifier.Object{objectplanmodifier.RequiresReplace()}},
+		"cidr":   schema.StringAttribute{Optional: true, Description: "Exact aligned IP prefix to claim."},
+		"value":  schema.StringAttribute{Optional: true, Description: "Exact address or decimal integer to claim, as a string."},
+		"offset": schema.Int64Attribute{Optional: true, Description: "Zero-based offset; negative values count from the end."},
+		"range":  schema.SingleNestedAttribute{Optional: true, Description: "Inclusive start/end or start_offset/end_offset pair.", Attributes: rangeAttrs},
 		"request": schema.SingleNestedAttribute{Optional: true, Computed: true, Description: "Automatic selection. Omitted defaults to one available value.", Attributes: map[string]schema.Attribute{
 			"kind":  schema.StringAttribute{Optional: true, Computed: true, Description: "Inferred as value, range or prefix. If set, must match the request.", PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()}},
 			"count": schema.StringAttribute{Optional: true, Description: "Number of contiguous values, as a positive decimal string; excludes prefix_length."}, "prefix_length": schema.Int64Attribute{Optional: true, Description: "Automatic aligned IP prefix length; excludes count."},
-		}, PlanModifiers: []planmodifier.Object{objectplanmodifier.UseStateForUnknown(), objectplanmodifier.RequiresReplaceIfConfigured()}},
+		}, PlanModifiers: []planmodifier.Object{objectplanmodifier.UseStateForUnknown()}},
 		"ref": refSchema(false), "result": resultSchema(),
 	}}
 }
@@ -288,9 +289,13 @@ func (r *claimResource) Read(ctx context.Context, req resource.ReadRequest, resp
 		resp.Diagnostics.AddError("Root UUID differs", "The allocation is not in the root recorded in state; it will not be adopted automatically.")
 		return
 	}
+	saved, savedErr := selection(ctx, m)
 	if err = fillClaim(&m, tree.Space(), a); err != nil {
 		resp.Diagnostics.AddError("Cannot describe claim", err.Error())
 		return
+	}
+	if savedErr == nil && automaticFits(saved, m.Result) {
+		setSelection(&m, saved)
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &m)...)
 }
@@ -333,21 +338,161 @@ func (r *claimResource) ImportState(ctx context.Context, req resource.ImportStat
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &m)...)
 }
+
+// automaticFits compares the allocated interval with the requested capacity.
+// It deliberately ignores the selector that originally created the allocation.
+func automaticFits(s allot.Selection, result types.Object) bool {
+	if s.Automatic == nil || result.IsNull() || result.IsUnknown() {
+		return false
+	}
+	attrs := result.Attributes()
+	text := func(name string) string {
+		value, ok := attrs[name].(types.String)
+		if !ok || value.IsNull() || value.IsUnknown() {
+			return ""
+		}
+		return value.ValueString()
+	}
+	if s.Automatic.PrefixLength != nil {
+		prefix, err := netip.ParsePrefix(text("cidr"))
+		return err == nil && prefix == prefix.Masked() && prefix.Bits() == *s.Automatic.PrefixLength
+	}
+	number := func(value string) (*big.Int, bool) {
+		if ip, err := netip.ParseAddr(value); err == nil {
+			return new(big.Int).SetBytes(ip.AsSlice()), true
+		}
+		n, ok := new(big.Int).SetString(value, 10)
+		return n, ok
+	}
+	start, ok := number(text("start"))
+	if !ok {
+		return false
+	}
+	end, ok := number(text("end"))
+	if !ok {
+		return false
+	}
+	count := big.NewInt(1)
+	if s.Automatic.Count != "" {
+		count, ok = new(big.Int).SetString(s.Automatic.Count, 10)
+		if !ok || count.Sign() <= 0 {
+			return false
+		}
+	}
+	return new(big.Int).Add(new(big.Int).Sub(end, start), big.NewInt(1)).Cmp(count) == 0
+}
+
 func (*claimResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
-	if req.Plan.Raw.IsNull() || len(resp.RequiresReplace) == 0 {
+	if req.Plan.Raw.IsNull() {
 		return
 	}
-	resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("id"), types.StringUnknown())...)
-	resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("ref"), types.ObjectUnknown(refTypes))...)
-	resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("result"), types.ObjectUnknown(resultTypes))...)
 	var config claimModel
 	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	if !req.State.Raw.IsNull() {
+		var state claimModel
+		resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		// A matching UUID, key and parent remain owned even when Terraform changes
+		// how it describes the required capacity. Unknown selectors defer the choice.
+		known := true
+		for _, v := range []attr.Value{config.CIDR, config.Value, config.Offset, config.Range, config.Request} {
+			if v.IsUnknown() {
+				known = false
+			}
+			if obj, ok := v.(types.Object); ok && !obj.IsNull() && !obj.IsUnknown() {
+				for _, nested := range obj.Attributes() {
+					if nested.IsUnknown() {
+						known = false
+					}
+				}
+			}
+		}
+		var plan claimModel
+		resp.Diagnostics.Append(resp.Plan.Get(ctx, &plan)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		if known && plan.Key.Equal(state.Key) && plan.Within.Equal(state.Within) {
+			desired, err := selection(ctx, config)
+			if err == nil && automaticFits(desired, state.Result) {
+				setSelection(&plan, desired)
+				plan.ID, plan.Ref, plan.Result = state.ID, state.Ref, state.Result
+				resp.Diagnostics.Append(resp.Plan.Set(ctx, &plan)...)
+				return
+			}
+		}
+		desired, err := selection(ctx, config)
+		changed := !plan.Key.Equal(state.Key) || !plan.Within.Equal(state.Within) ||
+			!plan.CIDR.Equal(state.CIDR) || !plan.Value.Equal(state.Value) ||
+			!plan.Offset.Equal(state.Offset) || !plan.Range.Equal(state.Range) ||
+			!plan.Request.Equal(state.Request)
+		if known && err == nil && desired.Automatic != nil && !automaticFits(desired, state.Result) {
+			changed = true
+		}
+		if !changed {
+			return
+		}
+		// Selector replacement is decided here so compatible capacity requests
+		// can update Terraform state without replacing the stored allocation.
+		resp.RequiresReplace.Append(path.Root("request"))
+	} else {
+		return
+	}
+	resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("id"), types.StringUnknown())...)
+	resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("ref"), types.ObjectUnknown(refTypes))...)
+	resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("result"), types.ObjectUnknown(resultTypes))...)
 	if config.Request.IsNull() {
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("request"), types.ObjectUnknown(requestTypes))...)
 	}
+}
+
+// Update changes only Terraform's description of a compatible allocation. The
+// ledger retains its original selector for UUID-specific retries and recovery.
+func (r *claimResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
+	var m claimModel
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &m)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	desired, err := selection(ctx, m)
+	if err != nil {
+		resp.Diagnostics.AddError("Invalid allocation request", err.Error())
+		return
+	}
+	parent, err := refFrom(ctx, m.Within)
+	if err != nil {
+		resp.Diagnostics.AddError("Invalid parent reference", err.Error())
+		return
+	}
+	tree, err := r.client.Load(ctx, parent.root())
+	if err != nil {
+		resp.Diagnostics.AddError("Cannot read allocation space", err.Error())
+		return
+	}
+	a, err := tree.Describe(m.ID.ValueString())
+	if err != nil {
+		resp.Diagnostics.AddError("Cannot inspect claim", err.Error())
+		return
+	}
+	if a.Key != m.Key.ValueString() || a.ParentID != parent.ID.ValueString() {
+		resp.Diagnostics.AddError("Allocation identity differs", "The allocation key and parent must match the managed claim.")
+		return
+	}
+	if err = fillClaim(&m, tree.Space(), a); err != nil {
+		resp.Diagnostics.AddError("Cannot describe claim", err.Error())
+		return
+	}
+	if !automaticFits(desired, m.Result) {
+		resp.Diagnostics.AddError("Incompatible allocation request", "The existing allocation does not satisfy the requested capacity; replacement is required.")
+		return
+	}
+	setSelection(&m, desired)
+	resp.Diagnostics.Append(resp.State.Set(ctx, &m)...)
 }
 
 var _ resource.ResourceWithConfigure = (*claimResource)(nil)

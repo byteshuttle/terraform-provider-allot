@@ -11,8 +11,10 @@ S3 storage without running the CLI or an allocation server.
 - [VLAN and SLA example](examples/integers/main.tf)
 
 Pass a parent's `.ref` output into `within`; `.id` is its allocation UUID. Actual
-values and bounds are in `.result`. Requests are immutable and changes require
-replacement. Destroy releases only childless allocations. Import explicitly
+values and bounds are in `.result`. Compatible automatic requests retain existing
+allocations; changing ownership or required capacity needs replacement. See
+[claim lifecycle](docs/resources/claim.md) for selector rules. Destroy releases
+only childless allocations. Import explicitly
 selects a live allocation with `SPACE_KEY/UUID`.
 
 ## Local development

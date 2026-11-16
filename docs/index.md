@@ -61,9 +61,11 @@ allocations also expose `.result.value`; CIDR-aligned IP intervals expose
 `.result.cidr`. Other result fields are null. Integer results are decimal strings;
 use `tonumber` when a consumer requires a Terraform number.
 
-Changing a key, parent, domain, bounds or selector requires replacement. The core
-does not support in-place moves or resizes. Destroy calls release, which fails if
-children remain. There is no recursive release, retirement state or cooldown.
+Changing a key, parent, domain or allocation bounds requires replacement. A
+compatible automatic request can describe an existing claim without reallocating
+it; see [claim selector rules](resources/claim.md). The core does not support
+in-place moves or resizes. Destroy calls release, which fails if children remain.
+There is no recursive release, retirement state or cooldown.
 
 ## Identity and recovery
 

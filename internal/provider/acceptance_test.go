@@ -421,7 +421,7 @@ func TestAccExplicitAdoption(t *testing.T) {
 	h.tf(0, "destroy", "-auto-approve")
 }
 
-func TestAccRequestModeReplacement(t *testing.T) {
+func TestAccRequestCompatibility(t *testing.T) {
 	buildProvider(t)
 	store := t.TempDir()
 	h := newHarness(t, store, "")
@@ -446,8 +446,15 @@ resource "allot_claim" "one" {
 		h.tf(0, "apply", "-auto-approve")
 		h.tf(0, "plan", "-detailed-exitcode")
 		claim := h.values()["allot_claim.one"]
-		if previous != nil && claim["id"] == previous {
-			t.Fatal("changed selector did not replace allocation")
+		if previous != nil {
+			// Relaxing an exact singleton to automatic keeps the allocation;
+			// incompatible capacity and changes to an exact selector replace it.
+			if selector == "" && claim["id"] != previous {
+				t.Fatal("compatible singleton request replaced allocation")
+			}
+			if selector != "" && claim["id"] == previous {
+				t.Fatal("incompatible selector retained allocation")
+			}
 		}
 		previous = claim["id"]
 		if selector != "request={count=3}" && claim["result"].(map[string]any)["value"] == nil {
@@ -455,4 +462,147 @@ resource "allot_claim" "one" {
 		}
 	}
 	h.tf(0, "destroy", "-auto-approve")
+}
+
+// A capacity mismatch must plan replacement, without modifying the ledger.
+func (h *harness) requireReplacement(address string) {
+	h.t.Helper()
+	h.tf(2, "plan", "-detailed-exitcode", "-out=change.tfplan")
+	cmd := exec.Command(testCLI(), "show", "-json", "change.tfplan")
+	cmd.Dir, cmd.Env = h.dir, h.env
+	out, err := cmd.Output()
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	var plan struct {
+		Changes []struct {
+			Address string `json:"address"`
+			Change  struct {
+				Actions []string `json:"actions"`
+			} `json:"change"`
+		} `json:"resource_changes"`
+	}
+	if err = json.Unmarshal(out, &plan); err != nil {
+		h.t.Fatal(err)
+	}
+	for _, change := range plan.Changes {
+		if change.Address == address && strings.Join(change.Change.Actions, ",") == "delete,create" {
+			return
+		}
+	}
+	h.t.Fatalf("%s must require replacement: %s", address, out)
+}
+
+// Import adopts the allocation UUID, while an automatic request constrains its
+// existing capacity rather than requiring the original allocation selector.
+func TestAccImportExactClaimAsAutomatic(t *testing.T) {
+	buildProvider(t)
+	for _, tc := range []struct {
+		name      string
+		kind      allot.Kind
+		bounds    allot.Range
+		selection allot.Selection
+		request   string
+		fits      bool
+	}{
+		{"ipv4_prefix", allot.IPv4, allot.Range{Start: "10.0.0.0", End: "10.0.255.255"}, allot.Selection{Prefix: "10.0.4.0/24"}, "request={prefix_length=24}", true},
+		{"ipv6_prefix", allot.IPv6, allot.Range{Start: "fd12::", End: "fd12::ffff:ffff:ffff:ffff:ffff"}, allot.Selection{Prefix: "fd12:0:0:abcd::/64"}, "request={prefix_length=64}", true},
+		{"integer_count", allot.Integer, allot.Range{Start: "0", End: "1000"}, allot.Selection{Range: &allot.Range{Start: "110", End: "119"}}, "request={count=10}", true},
+		{"ipv4_count", allot.IPv4, allot.Range{Start: "10.0.0.0", End: "10.0.255.255"}, allot.Selection{Range: &allot.Range{Start: "10.0.4.3", End: "10.0.4.12"}}, "request={count=10}", true},
+		{"ipv6_large_count", allot.IPv6, allot.Range{Start: "fd12::", End: "fd12::ffff:ffff:ffff:ffff:ffff"}, allot.Selection{Prefix: "fd12:0:0:abcd::/64"}, "request={count=\"18446744073709551616\"}", true},
+		{"implicit_singleton", allot.Integer, allot.Range{Start: "0", End: "1000"}, allot.Selection{Value: "101"}, "", true},
+		{"explicit_singleton", allot.IPv4, allot.Range{Start: "10.0.0.0", End: "10.0.255.255"}, allot.Selection{Value: "10.0.4.7"}, "request={}", true},
+		{"prefix_too_large", allot.IPv4, allot.Range{Start: "10.0.0.0", End: "10.0.255.255"}, allot.Selection{Prefix: "10.0.4.0/23"}, "request={prefix_length=24}", false},
+		{"prefix_too_small", allot.IPv4, allot.Range{Start: "10.0.0.0", End: "10.0.255.255"}, allot.Selection{Prefix: "10.0.4.0/25"}, "request={prefix_length=24}", false},
+		{"unaligned_prefix", allot.IPv4, allot.Range{Start: "10.0.0.0", End: "10.0.255.255"}, allot.Selection{Range: &allot.Range{Start: "10.0.4.1", End: "10.0.5.0"}}, "request={prefix_length=24}", false},
+		{"count_mismatch", allot.Integer, allot.Range{Start: "0", End: "1000"}, allot.Selection{Range: &allot.Range{Start: "110", End: "120"}}, "request={count=10}", false},
+		{"range_is_not_singleton", allot.Integer, allot.Range{Start: "0", End: "1000"}, allot.Selection{Range: &allot.Range{Start: "110", End: "119"}}, "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := t.TempDir()
+			s, err := backend.Open(ctx, backend.Config{Store: store})
+			if err != nil {
+				t.Fatal(err)
+			}
+			c, err := allot.NewClient(s, allot.ClientOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			space := allot.Space{ID: allot.NewID(), Key: "external", Kind: tc.kind, Range: tc.bounds}
+			if _, err = c.Create(ctx, space); err != nil {
+				t.Fatal(err)
+			}
+			claim, err := c.Allocate(ctx, space.Ref(), space.ID, allot.Request{ID: allot.NewID(), Key: "existing", Select: tc.selection})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.name == "ipv4_prefix" {
+				if _, err := c.Allocate(ctx, space.Ref(), claim.ID, allot.Request{ID: allot.NewID(), Key: "consumer", Select: allot.Selection{Value: "10.0.4.7"}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := c.Load(ctx, space.Ref())
+			if err != nil {
+				t.Fatal(err)
+			}
+			beforeJSON, err := before.Encode()
+			if err != nil {
+				t.Fatal(err)
+			}
+			h := newHarness(t, store, "")
+			config := fmt.Sprintf(`
+provider "allot" {store=%q}
+resource "allot_space" "external" {
+  key="external"
+  kind=%q
+  range={start=%q,end=%q}
+}
+resource "allot_claim" "existing" {
+  key="existing"
+  within=allot_space.external.ref
+  %s
+}
+`, store, tc.kind, tc.bounds.Start, tc.bounds.End, tc.request)
+			h.write(config)
+			h.tf(0, "import", "allot_space.external", "external/"+space.ID)
+			h.tf(0, "import", "allot_claim.existing", "external/"+claim.ID)
+			if tc.fits {
+				// Applying may update Terraform's selector, but must keep the
+				// allocation UUID and leave the allocation store untouched.
+				h.tf(0, "apply", "-auto-approve")
+				h.tf(0, "plan", "-detailed-exitcode")
+				h.tf(0, "apply", "-refresh-only", "-auto-approve")
+				h.tf(0, "plan", "-detailed-exitcode")
+				if h.values()["allot_claim.existing"]["id"] != claim.ID {
+					t.Fatal("compatible import replaced the allocation UUID")
+				}
+				if tc.name == "ipv4_prefix" {
+					h.write(strings.Replace(config, `key="existing"`, `key="renamed"`, 1))
+					h.requireReplacement("allot_claim.existing")
+					other := fmt.Sprintf(`
+resource "allot_space" "other" {
+  key="other"
+  cidr="10.0.0.0/16"
+}
+`)
+					h.write(strings.Replace(config, "within=allot_space.external.ref", "within=allot_space.other.ref", 1) + other)
+					h.requireReplacement("allot_claim.existing")
+				}
+			} else {
+				h.requireReplacement("allot_claim.existing")
+			}
+			after, err := c.Load(ctx, space.Ref())
+			if err != nil {
+				t.Fatal(err)
+			}
+			afterJSON, err := after.Encode()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(beforeJSON) != string(afterJSON) {
+				t.Fatal("reconciling imported selectors mutated the allocation store")
+			}
+		})
+	}
 }

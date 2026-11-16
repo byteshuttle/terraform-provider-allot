@@ -54,7 +54,11 @@ Outputs are `id`, `ref`, and `result`. Use `result.value` for an automatically
 selected address or ID, `result.cidr` for a selected IP prefix, and `result.start`
 and `result.end` for any interval. Input selectors remain the original request.
 
-Changing the key, parent or selector requires replacement with a fresh UUID.
+Changing the key or parent requires replacement with a fresh UUID. An automatic
+request retains an existing allocation when its capacity matches: `prefix_length`
+requires that exact aligned prefix size, `count` requires that exact number of
+values, and an omitted selector or empty request requires one value. Changing to
+an incompatible request or changing an exact selector requires replacement.
 Release is UUID-specific and fails if the allocation still has children. With a
 delegated DHCP range, DHCP bindings and exclusions remain the network consumer's
 responsibility; the allocator does not track live leases.
@@ -63,9 +67,17 @@ responsibility; the allocator does not track live leases.
 terraform import allot_claim.printer 'home/ipv4/ALLOCATION_UUID'
 ```
 
-Import reads the stored parent and selector. A root UUID belongs to `allot_space`,
-not this resource. Import is an explicit ownership decision, not a name-based
-search or automatic adoption.
+Import reads the stored parent and selector. The resource may keep an automatic
+size request even when the imported allocation was created with an exact selector.
+For example, an imported exact `10.0.4.0/24` satisfies `request = {
+prefix_length = 24 }` within the same parent. Applying this compatible change
+updates Terraform state without changing the allocation UUID, bounds, children
+or stored original selector. Subsequent refreshes retain the configured request.
+A larger or smaller prefix, an unaligned interval, or a different parent does not
+satisfy that request.
+
+A root UUID belongs to `allot_space`, not this resource. Import is an explicit
+ownership decision, not a name-based search or automatic adoption.
 
 ## Schema
 
