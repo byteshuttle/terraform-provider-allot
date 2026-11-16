@@ -1,0 +1,89 @@
+name: Repair release checksums
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag whose checksum file incorrectly lists signing-key.asc
+        type: string
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: repair-release-checksums-${{ inputs.tag }}
+  cancel-in-progress: false
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Validate and download existing release
+        run: |
+          python3 - <<'PYTHON'
+          import os, re
+          if not re.fullmatch(r'v\d+\.\d+\.\d+', os.environ['RELEASE_TAG']):
+              raise SystemExit('Expected a stable semantic release tag')
+          PYTHON
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/registry-release"
+          echo "RELEASE_DIR=$RUNNER_TEMP/registry-release" >> "$GITHUB_ENV"
+          echo "CHECKSUM_NAME=terraform-provider-allot_${RELEASE_TAG#v}_SHA256SUMS" >> "$GITHUB_ENV"
+      - name: Verify original provenance
+        run: |
+          gh attestation verify "$RELEASE_DIR/$CHECKSUM_NAME" --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+            --source-ref "refs/tags/$RELEASE_TAG" \
+            --source-digest "$(git rev-parse "$RELEASE_TAG^{}")"
+      - name: Import signing key
+        uses: crazy-max/ghaction-import-gpg@2dc316deee8e90f13e1a351ab510b4d5bc0c82cd # v7.0.0
+        id: gpg
+        with:
+          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
+          passphrase: ${{ secrets.PASSPHRASE }}
+      - name: Verify and repair checksum inventory
+        working-directory: ${{ runner.temp }}/registry-release
+        run: |
+          gpg --batch --verify "$CHECKSUM_NAME.sig" "$CHECKSUM_NAME"
+          sha256sum -c "$CHECKSUM_NAME"
+          python3 "$GITHUB_WORKSPACE/.github/scripts/release_checksums.py" . --remove-public-key
+          python3 "$GITHUB_WORKSPACE/.github/scripts/release_checksums.py" .
+      - name: Sign corrected checksum file
+        env:
+          GPG_FINGERPRINT: ${{ steps.gpg.outputs.fingerprint }}
+        run: |
+          gpg --batch --local-user "$GPG_FINGERPRINT" --output "$RELEASE_DIR/$CHECKSUM_NAME.new.sig" --detach-sign "$RELEASE_DIR/$CHECKSUM_NAME"
+          mv "$RELEASE_DIR/$CHECKSUM_NAME.new.sig" "$RELEASE_DIR/$CHECKSUM_NAME.sig"
+          gpg --batch --verify "$RELEASE_DIR/$CHECKSUM_NAME.sig" "$RELEASE_DIR/$CHECKSUM_NAME"
+      - name: Attest corrected checksum file
+        id: attest
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: ${{ runner.temp }}/registry-release/terraform-provider-allot_*_SHA256SUMS
+      - name: Preserve archive provenance and upload corrected metadata
+        env:
+          BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          python3 - <<'PYTHON'
+          import json, os
+          from pathlib import Path
+          target = Path(os.environ['RELEASE_DIR']) / 'provenance.sigstore.json'
+          decoder = json.JSONDecoder()
+          records = []
+          for source in [target, Path(os.environ['BUNDLE_PATH'])]:
+              remaining = source.read_text().strip()
+              while remaining:
+                  record, end = decoder.raw_decode(remaining)
+                  records.append(record)
+                  remaining = remaining[end:].strip()
+          target.write_text(''.join(json.dumps(record) + '\n' for record in records))
+          PYTHON
+          gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --clobber \
+            "$RELEASE_DIR/$CHECKSUM_NAME" "$RELEASE_DIR/$CHECKSUM_NAME.sig" "$RELEASE_DIR/provenance.sigstore.json"

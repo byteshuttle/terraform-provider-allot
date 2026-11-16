@@ -17,6 +17,11 @@ GitHub's `GPG_PRIVATE_KEY` and `PASSPHRASE` Actions secrets, and update the publ
 key registered with the Terraform Registry. Keep a protected backup of the
 private key, passphrase and revocation certificate outside the repository.
 
+The checksum file lists provider archives and the Registry manifest only. The
+public key is attached separately; including it in package checksums prevents
+Registry ingestion. The release workflow validates this inventory before
+attesting the draft.
+
 The release workflow reads those secrets to sign the checksum file. Register
 the public key and provider with the Terraform Registry before expecting Registry
 installation to work. [OIDC attestations do not replace that signature](https://developer.hashicorp.com/terraform/registry/providers/publishing).
@@ -87,3 +92,20 @@ sha256sum --check --ignore-missing PROJECT_VERSION_SHA256SUMS
 Replace `PROJECT_VERSION` with the downloaded asset prefix. Ensure the downloaded
 archive appears as `OK`; other platforms' missing files are skipped. Compare the
 signing fingerprint with the trusted published fingerprint.
+
+## Repair a rejected checksum inventory
+
+If Registry ingestion rejects an existing release because its package checksum
+file includes `signing-key.asc`, dispatch the **Repair release checksums** workflow
+with that release tag. It verifies the original signature, provenance and asset
+hashes, removes only the public-key entry, then signs and attests the corrected
+checksum file. Provider archives, their hashes and tags stay unchanged. The
+updated offline bundle retains the archive attestations.
+
+```sh
+gh workflow run repair-release-checksums.yml --repo byteshuttle/terraform-provider-allot -f tag=v0.1.1
+```
+
+After the workflow succeeds, verify the corrected signature and checksum-file
+attestation from `repair-release-checksums.yml`, update any consumer pin of the
+checksum file itself, and resync the provider in the Registry.
