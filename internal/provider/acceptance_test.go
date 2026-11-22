@@ -250,15 +250,12 @@ func runLifecycle(t *testing.T, config backend.Config, extra string) {
 			},
 		),
 	}}
-	for _, item := range []struct{ address, key string }{
-		{"allot_claim.printer", "home/ipv4"}, {"allot_claim.dhcp", "home/ipv4"},
-		{"allot_claim.vlan", "fabric/vlan"}, {"allot_claim.automatic", "fabric/vlan"},
-		{"allot_claim.lan6", "home/ipv6"}, {"allot_claim.fixed6", "home/ipv6"},
-		{"allot_claim.gateway", "home/ipv4"}, {"allot_claim.reserved", "fabric/vlan"},
-		{"allot_claim.batch", "fabric/vlan"}, {"allot_claim.explicit_auto", "fabric/vlan"},
-		{"allot_space.home", "home/ipv4"}, {"allot_space.ula", "home/ipv6"}, {"allot_space.ids", "fabric/vlan"},
+	for _, address := range []string{
+		"allot_claim.printer", "allot_claim.dhcp", "allot_claim.vlan", "allot_claim.automatic",
+		"allot_claim.lan6", "allot_claim.fixed6", "allot_claim.gateway", "allot_claim.reserved",
+		"allot_claim.batch", "allot_claim.explicit_auto", "allot_space.home", "allot_space.ula", "allot_space.ids",
 	} {
-		steps = append(steps, resource.TestStep{ResourceName: item.address, ImportState: true, ImportStateIdPrefix: item.key + "/", ImportStateVerify: true})
+		steps = append(steps, resource.TestStep{ResourceName: address, ImportState: true, ImportStateVerify: true})
 	}
 	steps = append(steps, resource.TestStep{Config: lifecycleConfig(store, extra, 102), Check: resource.ComposeAggregateTestCheckFunc(
 		resource.TestCheckResourceAttr("allot_claim.vlan", "result.value", "102"),
@@ -287,6 +284,157 @@ func runLifecycle(t *testing.T, config backend.Config, extra string) {
 	})
 }
 func TestAccLocalLifecycle(t *testing.T) { runLifecycle(t, backend.Config{Store: t.TempDir()}, "") }
+
+// Tags are managed through Terraform without changing allocation identity.
+func TestAccTagsUpdate(t *testing.T) {
+	if os.Getenv("TF_ACC") != "1" {
+		t.Skip("set TF_ACC=1 to run acceptance tests")
+	}
+	store := t.TempDir()
+	h := newHarness(t, store, "")
+	config := func(name, usage string) string {
+		return fmt.Sprintf(`
+provider "allot" { store = %q }
+resource "allot_space" "home" {
+  cidr = "10.0.0.0/24"
+  tags = { Name = %q }
+}
+resource "allot_claim" "lan" {
+  within = allot_space.home.ref
+  cidr = "10.0.0.0/25"
+  tags = { Name = "LAN", usage = %q }
+}
+`, store, name, usage)
+	}
+	h.write(config("Home", "reserved"))
+	h.tf(0, "apply", "-auto-approve")
+	before := h.values()
+	h.write(config("House", "active"))
+	h.tf(0, "apply", "-auto-approve")
+	after := h.values()
+	for _, address := range []string{"allot_space.home", "allot_claim.lan"} {
+		if before[address]["id"] != after[address]["id"] {
+			t.Fatalf("%s replaced for tags", address)
+		}
+		if after[address]["key"] != after[address]["id"] {
+			t.Fatalf("%s default key differs from UUID", address)
+		}
+	}
+	if got := after["allot_space.home"]["tags"].(map[string]any)["Name"]; got != "House" {
+		t.Fatalf("space Name: %v", got)
+	}
+	if got := after["allot_claim.lan"]["tags"].(map[string]any)["usage"]; got != "active" {
+		t.Fatalf("claim usage: %v", got)
+	}
+	h.tf(0, "plan", "-detailed-exitcode")
+}
+
+// Provider defaults apply to both resource kinds; explicit tags win and default changes update in place.
+func TestAccDefaultTags(t *testing.T) {
+	if os.Getenv("TF_ACC") != "1" {
+		t.Skip("set TF_ACC=1 to run acceptance tests")
+	}
+	store := t.TempDir()
+	h := newHarness(t, store, "")
+	config := func(owner string) string {
+		defaults := ""
+		if owner != "" {
+			defaults = fmt.Sprintf("default_tags { tags = { Owner = %q, Environment = \"test\", Name = \"Provider name\" } }", owner)
+		}
+		return fmt.Sprintf(`
+provider "allot" {
+  store = %q
+  %s
+}
+resource "allot_space" "home" {
+  cidr = "10.0.0.0/24"
+  tags = { Name = "Home" }
+}
+resource "allot_claim" "lan" {
+  within = allot_space.home.ref
+  cidr = "10.0.0.0/25"
+  tags = { Environment = "lan" }
+}
+resource "allot_claim" "host" {
+  within = allot_space.home.ref
+  value = "10.0.0.200"
+}
+`, store, defaults)
+	}
+	h.write(config("team-a"))
+	h.tf(0, "apply", "-auto-approve")
+	before := h.values()
+	space := before["allot_space.home"]
+	claim := before["allot_claim.lan"]
+	if got := space["tags"].(map[string]any); len(got) != 1 || got["Name"] != "Home" {
+		t.Fatalf("space resource tags: %v", got)
+	}
+	if got := claim["tags"].(map[string]any); len(got) != 1 || got["Environment"] != "lan" {
+		t.Fatalf("claim resource tags: %v", got)
+	}
+	if got := before["allot_claim.host"]["tags"]; got != nil {
+		t.Fatalf("default-only claim resource tags: %v", got)
+	}
+	for address, want := range map[string]map[string]string{
+		"allot_space.home": {"Owner": "team-a", "Environment": "test", "Name": "Home"},
+		"allot_claim.lan":  {"Owner": "team-a", "Environment": "lan", "Name": "Provider name"},
+		"allot_claim.host": {"Owner": "team-a", "Environment": "test", "Name": "Provider name"},
+	} {
+		got := before[address]["tags_all"].(map[string]any)
+		if len(got) != len(want) {
+			t.Fatalf("%s merged tags: %v", address, got)
+		}
+		for key, value := range want {
+			if got[key] != value {
+				t.Fatalf("%s %s: got %v, want %q", address, key, got[key], value)
+			}
+		}
+	}
+	h.write(config("team-b"))
+	h.tf(0, "apply", "-auto-approve")
+	after := h.values()
+	for _, address := range []string{"allot_space.home", "allot_claim.lan", "allot_claim.host"} {
+		if after[address]["id"] != before[address]["id"] {
+			t.Fatalf("%s replaced after provider default changed", address)
+		}
+		if got := after[address]["tags_all"].(map[string]any)["Owner"]; got != "team-b" {
+			t.Fatalf("%s Owner: %v", address, got)
+		}
+	}
+	h.tf(0, "plan", "-detailed-exitcode")
+	h.tf(0, "state", "rm", "allot_claim.lan")
+	h.tf(0, "import", "allot_claim.lan", after["allot_claim.lan"]["id"].(string))
+	imported := h.values()["allot_claim.lan"]
+	if got := imported["tags"].(map[string]any); len(got) != 1 || got["Environment"] != "lan" {
+		t.Fatalf("imported claim resource tags: %v", got)
+	}
+	if got := imported["tags_all"].(map[string]any)["Owner"]; got != "team-b" {
+		t.Fatalf("imported claim default Owner: %v", got)
+	}
+	h.tf(0, "plan", "-detailed-exitcode")
+	h.write(config(""))
+	h.tf(0, "apply", "-auto-approve")
+	afterRemoval := h.values()
+	for address, expected := range map[string]map[string]string{
+		"allot_space.home": {"Name": "Home"},
+		"allot_claim.lan":  {"Environment": "lan"},
+		"allot_claim.host": {},
+	} {
+		if afterRemoval[address]["id"] != before[address]["id"] {
+			t.Fatalf("%s replaced after defaults removed", address)
+		}
+		got := afterRemoval[address]["tags_all"].(map[string]any)
+		if len(got) != len(expected) {
+			t.Fatalf("%s tags after defaults removed: %v", address, got)
+		}
+		for key, value := range expected {
+			if got[key] != value {
+				t.Fatalf("%s %s after defaults removed: %v", address, key, got[key])
+			}
+		}
+	}
+	h.tf(0, "plan", "-detailed-exitcode")
+}
 
 // Planning must leave the allocation ledger empty.
 func TestAccPlanDoesNotAllocate(t *testing.T) {
@@ -409,14 +557,13 @@ func TestAccExplicitAdoption(t *testing.T) {
 	}
 	h := newHarness(t, store, "")
 	h.write(fmt.Sprintf("provider \"allot\" {store=%q}\nresource \"allot_space\" \"external\" {\nkey=\"external\"\ncidr=\"10.0.0.0/24\"\n}\n", store))
-	output := h.tf(1, "apply", "-auto-approve")
-	if !strings.Contains(strings.Join(strings.Fields(output), " "), "different identity") {
-		t.Fatalf("apply failed for another reason: %s", output)
+	h.tf(0, "apply", "-auto-approve")
+	if h.values()["allot_space.external"]["id"] == space.ID {
+		t.Fatal("same-key root adopted an existing UUID")
 	}
-	if _, managed := h.values()["allot_space.external"]; managed {
-		t.Fatal("same-name root silently adopted")
+	if _, err := c.Load(context.Background(), space.Ref()); err != nil {
+		t.Fatalf("existing UUID affected: %v", err)
 	}
-	h.tf(0, "import", "allot_space.external", "external/"+space.ID)
 	h.tf(0, "plan", "-detailed-exitcode")
 	h.tf(0, "destroy", "-auto-approve")
 }
@@ -565,8 +712,8 @@ resource "allot_claim" "existing" {
 }
 `, store, tc.kind, tc.bounds.Start, tc.bounds.End, tc.request)
 			h.write(config)
-			h.tf(0, "import", "allot_space.external", "external/"+space.ID)
-			h.tf(0, "import", "allot_claim.existing", "external/"+claim.ID)
+			h.tf(0, "import", "allot_space.external", space.ID)
+			h.tf(0, "import", "allot_claim.existing", claim.ID)
 			if tc.fits {
 				// Applying may update Terraform's selector, but must keep the
 				// allocation UUID and leave the allocation store untouched.

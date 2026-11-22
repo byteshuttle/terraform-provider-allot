@@ -3,7 +3,8 @@ module github.com/byteshuttle/terraform-provider-allot
 go 1.26.0
 
 require (
-	github.com/byteshuttle/allot v0.1.0
+	github.com/byteshuttle/allot v0.2.0
+	github.com/google/uuid v1.6.0
 	github.com/hashicorp/terraform-plugin-framework v1.19.0
 	github.com/hashicorp/terraform-plugin-go v0.31.0
 	github.com/hashicorp/terraform-plugin-testing v1.16.0
@@ -44,7 +45,6 @@ require (
 	github.com/gofrs/flock v0.13.2 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/hashicorp/cli v1.1.7 // indirect
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/hashicorp/go-checkpoint v0.5.0 // indirect

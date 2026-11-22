@@ -53,6 +53,9 @@ Automatic selection happens during apply and persists the concrete allocation.
 Outputs are `id`, `ref`, and `result`. Use `result.value` for an automatically
 selected address or ID, `result.cidr` for a selected IP prefix, and `result.start`
 and `result.end` for any interval. Input selectors remain the original request.
+Set resource-specific tags in `tags`; they override matching provider
+`default_tags`. Read the merged stored map from `tags_all`. Tag changes update
+the claim without replacing its UUID.
 
 Changing the key or parent requires replacement with a fresh UUID. An automatic
 request retains an existing allocation when its capacity matches: `prefix_length`

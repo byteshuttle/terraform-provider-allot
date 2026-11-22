@@ -38,6 +38,9 @@ values, represented as strings internally without floating-point conversion.
 
 Outputs are `id` (UUID), `ref` (parent reference for claims), and `result` with
 resolved `start`, `end`, optional singleton `value`, and optional IP `cidr`.
+Set resource-specific tags in `tags`; they override matching provider
+`default_tags`. Read the merged stored map from `tags_all`. Tag changes update
+the space without replacing its UUID.
 
 Configuration changes require replacement. An existing same-name root with another
 UUID is a conflict; import it explicitly if this state should manage it. Releasing

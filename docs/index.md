@@ -46,6 +46,27 @@ Do not include keys in store URLs. Terraform backend authentication is independe
 both can use the same execution environment, but backend-only profile, role and
 endpoint settings are not automatically passed to this provider.
 
+## Default tags
+
+```hcl
+provider "allot" {
+  store = "/absolute/path/to/allocations"
+  default_tags {
+    tags = {
+      Environment = "production"
+      Owner       = "network"
+    }
+  }
+}
+```
+
+`default_tags` applies to both spaces and claims. A resource's `tags` map
+overrides provider defaults with the same key; `tags_all` reports the merged
+tags stored on the allocation. `Name` follows the same rule as any other tag.
+Changing or removing provider defaults updates existing allocations without
+replacing their UUIDs. Imported tags equal to a current provider default are
+treated as inherited unless the resource configuration explicitly sets them.
+
 ## Resources and references
 
 - [allot_space](resources/space.md) owns one root allocation scope.
@@ -90,8 +111,16 @@ store and prefix consistently, and withdraw consumers before releasing capacity.
 
 ### Optional
 
+- `default_tags` (Block, Optional) Tags applied to every space and claim. Resource tags override matching keys. (see [below for nested schema](#nestedblock--default_tags))
 - `endpoint` (String) Optional S3-compatible endpoint.
 - `path_style` (Boolean) Use path-style S3 addressing.
 - `profile` (String) AWS SDK shared configuration profile.
 - `region` (String) S3 signing region; otherwise uses AWS SDK configuration.
 - `store` (String) Local path, file:///path or s3://bucket/prefix. Defaults to ALLOT_STORE.
+
+<a id="nestedblock--default_tags"></a>
+### Nested Schema for `default_tags`
+
+Optional:
+
+- `tags` (Map of String) Default string tags for all managed allocations.

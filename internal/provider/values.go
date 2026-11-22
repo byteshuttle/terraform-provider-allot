@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/byteshuttle/allot"
+	"github.com/google/uuid"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
+	"github.com/hashicorp/terraform-plugin-framework/path"
+	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/objectplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
@@ -20,6 +22,122 @@ var resultTypes = map[string]attr.Type{"start": types.StringType, "end": types.S
 var boundsTypes = map[string]attr.Type{"start": types.StringType, "end": types.StringType}
 var rangeTypes = map[string]attr.Type{"start": types.StringType, "end": types.StringType, "start_offset": types.Int64Type, "end_offset": types.Int64Type}
 var requestTypes = map[string]attr.Type{"kind": types.StringType, "count": types.StringType, "prefix_length": types.Int64Type}
+
+func tagsFrom(ctx context.Context, value types.Map) (map[string]string, error) {
+	if value.IsNull() {
+		return nil, nil
+	}
+	if value.IsUnknown() {
+		return nil, errors.New("tags must be known")
+	}
+	tags := map[string]string{}
+	if diagnostics := value.ElementsAs(ctx, &tags, false); diagnostics.HasError() {
+		return nil, errors.New(diagnostics.Errors()[0].Detail())
+	}
+	for key := range tags {
+		if key == "" {
+			return nil, errors.New("tag keys must be nonempty")
+		}
+	}
+	return tags, nil
+}
+
+func tagsValue(ctx context.Context, tags map[string]string, previous types.Map) (types.Map, error) {
+	if len(tags) == 0 && previous.IsNull() {
+		return types.MapNull(types.StringType), nil
+	}
+	if tags == nil {
+		tags = map[string]string{}
+	}
+	value, diagnostics := types.MapValueFrom(ctx, types.StringType, tags)
+	if diagnostics.HasError() {
+		return types.MapNull(types.StringType), errors.New(diagnostics.Errors()[0].Detail())
+	}
+	return value, nil
+}
+
+func mergeTags(defaults, explicit map[string]string) map[string]string {
+	merged := make(map[string]string, len(defaults)+len(explicit))
+	for key, value := range defaults {
+		merged[key] = value
+	}
+	for key, value := range explicit {
+		merged[key] = value
+	}
+	return merged
+}
+
+func resourceTags(ctx context.Context, value types.Map, defaults map[string]string) (map[string]string, error) {
+	explicit, err := tagsFrom(ctx, value)
+	if err != nil {
+		return nil, err
+	}
+	return mergeTags(defaults, explicit), nil
+}
+
+func tagsAllValue(ctx context.Context, tags map[string]string) (types.Map, error) {
+	if tags == nil {
+		tags = map[string]string{}
+	}
+	value, diagnostics := types.MapValueFrom(ctx, types.StringType, tags)
+	if diagnostics.HasError() {
+		return types.MapNull(types.StringType), errors.New(diagnostics.Errors()[0].Detail())
+	}
+	return value, nil
+}
+
+func readResourceTags(ctx context.Context, stored map[string]string, previous, previousAll types.Map, defaults map[string]string) (types.Map, types.Map, error) {
+	explicitBefore, err := tagsFrom(ctx, previous)
+	if err != nil {
+		return types.MapNull(types.StringType), types.MapNull(types.StringType), err
+	}
+	allBefore, err := tagsFrom(ctx, previousAll)
+	if err != nil {
+		return types.MapNull(types.StringType), types.MapNull(types.StringType), err
+	}
+	explicit := make(map[string]string)
+	for key, value := range stored {
+		if _, wasExplicit := explicitBefore[key]; wasExplicit {
+			explicit[key] = value
+			continue
+		}
+		if _, wasInherited := allBefore[key]; wasInherited {
+			continue
+		}
+		if defaultValue, isDefault := defaults[key]; !isDefault || value != defaultValue {
+			explicit[key] = value
+		}
+	}
+	resourceValue, err := tagsValue(ctx, explicit, previous)
+	if err != nil {
+		return types.MapNull(types.StringType), types.MapNull(types.StringType), err
+	}
+	allValue, err := tagsAllValue(ctx, stored)
+	return resourceValue, allValue, err
+}
+
+func planTagsAll(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse, defaults map[string]string) {
+	var resourceValue types.Map
+	resp.Diagnostics.Append(req.Plan.GetAttribute(ctx, path.Root("tags"), &resourceValue)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if resourceValue.IsUnknown() {
+		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("tags_all"), types.MapUnknown(types.StringType))...)
+		return
+	}
+	merged, err := resourceTags(ctx, resourceValue, defaults)
+	if err != nil {
+		resp.Diagnostics.AddError("Invalid tags", err.Error())
+		return
+	}
+	allValue, err := tagsAllValue(ctx, merged)
+	if err != nil {
+		resp.Diagnostics.AddError("Invalid tags", err.Error())
+		return
+	}
+	resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("tags_all"), allValue)...)
+}
 
 type reference struct {
 	SpaceKey types.String `tfsdk:"space_key"`
@@ -92,12 +210,12 @@ func stringOrNull(value string) types.String {
 	}
 	return types.StringValue(value)
 }
-func importID(value string) (string, string, error) {
-	index := strings.LastIndex(value, "/")
-	if index < 1 || index == len(value)-1 {
-		return "", "", errors.New("import ID must be SPACE_KEY/ALLOCATION_UUID")
+func importID(value string) (string, error) {
+	id, err := uuid.Parse(value)
+	if err != nil || id.String() != value || id == uuid.Nil {
+		return "", errors.New("import ID must be a canonical allocation UUID")
 	}
-	return value[:index], value[index+1:], nil
+	return value, nil
 }
 func operationError(id string, err error) string {
 	if errors.Is(err, allot.ErrUncertain) {

@@ -20,7 +20,7 @@ selects a live allocation with `SPACE_KEY/UUID`.
 ## Local development
 
 Prerequisites are Go 1.26 or later and Terraform. The provider pins the released
-`github.com/byteshuttle/allot v0.1.0` module and builds independently of the core
+`github.com/byteshuttle/allot v0.2.0` module and builds independently of the core
 checkout. CI sets `GOWORK=off` to verify that released dependency.
 
 The optional parent `go.work` selects the sibling core for joint development.

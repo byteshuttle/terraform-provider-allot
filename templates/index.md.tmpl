@@ -46,6 +46,27 @@ Do not include keys in store URLs. Terraform backend authentication is independe
 both can use the same execution environment, but backend-only profile, role and
 endpoint settings are not automatically passed to this provider.
 
+## Default tags
+
+```hcl
+provider "allot" {
+  store = "/absolute/path/to/allocations"
+  default_tags {
+    tags = {
+      Environment = "production"
+      Owner       = "network"
+    }
+  }
+}
+```
+
+`default_tags` applies to both spaces and claims. A resource's `tags` map
+overrides provider defaults with the same key; `tags_all` reports the merged
+tags stored on the allocation. `Name` follows the same rule as any other tag.
+Changing or removing provider defaults updates existing allocations without
+replacing their UUIDs. Imported tags equal to a current provider default are
+treated as inherited unless the resource configuration explicitly sets them.
+
 ## Resources and references
 
 - [allot_space](resources/space.md) owns one root allocation scope.

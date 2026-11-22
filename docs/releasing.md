@@ -31,7 +31,7 @@ for archives and checksums. It needs `id-token: write`, `attestations: write` an
 `contents: write`. Attestations require a public repository on Free/Pro/Team plans;
 private repositories need an eligible Enterprise plan. See [GitHub's attestation guide](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations).
 
-The provider pins core `v0.1.0`. For core upgrades, publish the new core version
+The provider pins core `v0.2.0`. For core upgrades, publish the new core version
 first, then update `go.mod` and `go.sum` and run the compatibility matrix. Both
 CI and the release job use `GOWORK=off`; releases reject development placeholders
 or local module replacements.

@@ -53,6 +53,9 @@ Automatic selection happens during apply and persists the concrete allocation.
 Outputs are `id`, `ref`, and `result`. Use `result.value` for an automatically
 selected address or ID, `result.cidr` for a selected IP prefix, and `result.start`
 and `result.end` for any interval. Input selectors remain the original request.
+Set resource-specific tags in `tags`; they override matching provider
+`default_tags`. Read the merged stored map from `tags_all`. Tag changes update
+the claim without replacing its UUID.
 
 Changing the key or parent requires replacement with a fresh UUID. An automatic
 request retains an existing allocation when its capacity matches: `prefix_length`
@@ -86,15 +89,16 @@ ownership decision, not a name-based search or automatic adoption.
 
 ### Required
 
-- `key` (String) Logical name unique across the root space. Changes require replacement.
 - `within` (Attributes) Allocation reference. Pass a parent resource ref to within. (see [below for nested schema](#nestedatt--within))
 
 ### Optional
 
 - `cidr` (String) Exact aligned IP prefix to claim.
+- `key` (String) Optional logical key. Defaults to the claim UUID; Name is an ordinary tag.
 - `offset` (Number) Zero-based offset; negative values count from the end.
 - `range` (Attributes) Inclusive start/end or start_offset/end_offset pair. (see [below for nested schema](#nestedatt--range))
 - `request` (Attributes) Automatic selection. Omitted defaults to one available value. (see [below for nested schema](#nestedatt--request))
+- `tags` (Map of String) Resource tags, including optional Name. Matching keys override provider default tags.
 - `value` (String) Exact address or decimal integer to claim, as a string.
 
 ### Read-Only
@@ -102,6 +106,7 @@ ownership decision, not a name-based search or automatic adoption.
 - `id` (String) Immutable allocation UUID.
 - `ref` (Attributes) Allocation reference. Pass a parent resource ref to within. (see [below for nested schema](#nestedatt--ref))
 - `result` (Attributes) Resolved allocation bounds and values. (see [below for nested schema](#nestedatt--result))
+- `tags_all` (Map of String) All stored tags, including provider defaults and resource overrides.
 
 <a id="nestedatt--within"></a>
 ### Nested Schema for `within`

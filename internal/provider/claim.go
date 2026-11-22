@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"net/netip"
+	"reflect"
 
 	"github.com/byteshuttle/allot"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
@@ -31,6 +32,8 @@ type claimModel struct {
 	Request types.Object `tfsdk:"request"`
 	Ref     types.Object `tfsdk:"ref"`
 	Result  types.Object `tfsdk:"result"`
+	Tags    types.Map    `tfsdk:"tags"`
+	TagsAll types.Map    `tfsdk:"tags_all"`
 }
 type claimRange struct {
 	Start       types.String `tfsdk:"start"`
@@ -51,7 +54,7 @@ func (*claimResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *
 	rangeAttrs := map[string]schema.Attribute{"start": schema.StringAttribute{Optional: true, Description: "Inclusive absolute lower bound."}, "end": schema.StringAttribute{Optional: true, Description: "Inclusive absolute upper bound."}, "start_offset": schema.Int64Attribute{Optional: true, Description: "Inclusive lower offset; negative values count from the end."}, "end_offset": schema.Int64Attribute{Optional: true, Description: "Inclusive upper offset; negative values count from the end."}}
 	resp.Schema = schema.Schema{Description: "A UUID-identified allocation within a root or parent claim.", Attributes: map[string]schema.Attribute{
 		"id":     schema.StringAttribute{Computed: true, Description: "Immutable allocation UUID.", PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()}},
-		"key":    schema.StringAttribute{Required: true, Description: "Logical name unique across the root space. Changes require replacement.", PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()}},
+		"key":    schema.StringAttribute{Optional: true, Computed: true, Description: "Optional logical key. Defaults to the claim UUID; Name is an ordinary tag.", PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown(), stringplanmodifier.RequiresReplaceIfConfigured()}},
 		"within": refSchema(true),
 		"cidr":   schema.StringAttribute{Optional: true, Description: "Exact aligned IP prefix to claim."},
 		"value":  schema.StringAttribute{Optional: true, Description: "Exact address or decimal integer to claim, as a string."},
@@ -61,7 +64,9 @@ func (*claimResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *
 			"kind":  schema.StringAttribute{Optional: true, Computed: true, Description: "Inferred as value, range or prefix. If set, must match the request.", PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()}},
 			"count": schema.StringAttribute{Optional: true, Description: "Number of contiguous values, as a positive decimal string; excludes prefix_length."}, "prefix_length": schema.Int64Attribute{Optional: true, Description: "Automatic aligned IP prefix length; excludes count."},
 		}, PlanModifiers: []planmodifier.Object{objectplanmodifier.UseStateForUnknown()}},
-		"ref": refSchema(false), "result": resultSchema(),
+		"tags":     schema.MapAttribute{Optional: true, ElementType: types.StringType, Description: "Resource tags, including optional Name. Matching keys override provider default tags."},
+		"tags_all": schema.MapAttribute{Computed: true, ElementType: types.StringType, Description: "All stored tags, including provider defaults and resource overrides."},
+		"ref":      refSchema(false), "result": resultSchema(),
 	}}
 }
 func selection(ctx context.Context, m claimModel) (allot.Selection, error) {
@@ -232,13 +237,26 @@ func (r *claimResource) Create(ctx context.Context, req resource.CreateRequest, 
 		resp.Diagnostics.AddError("Invalid allocation request", err.Error())
 		return
 	}
+	tags, err := resourceTags(ctx, m.Tags, r.defaultTags)
+	if err != nil {
+		resp.Diagnostics.AddError("Invalid tags", err.Error())
+		return
+	}
+	m.TagsAll, err = tagsAllValue(ctx, tags)
+	if err != nil {
+		resp.Diagnostics.AddError("Invalid tags", err.Error())
+		return
+	}
 	tree, err := r.client.Load(ctx, parent.root())
 	if err != nil {
 		resp.Diagnostics.AddError("Cannot read allocation space", err.Error())
 		return
 	}
 	id := allot.NewID()
-	claim, err := r.client.Allocate(ctx, parent.root(), parent.ID.ValueString(), allot.Request{ID: id, Key: m.Key.ValueString(), Select: s})
+	if m.Key.IsNull() || m.Key.IsUnknown() {
+		m.Key = types.StringValue(id)
+	}
+	claim, err := r.client.Allocate(ctx, parent.root(), parent.ID.ValueString(), allot.Request{ID: id, Key: m.Key.ValueString(), Select: s, Tags: tags})
 	if err != nil {
 		if errors.Is(err, allot.ErrUncertain) {
 			m.ID = types.StringValue(id)
@@ -267,7 +285,7 @@ func (r *claimResource) Read(ctx context.Context, req resource.ReadRequest, resp
 		resp.Diagnostics.AddError("Invalid saved reference", err.Error())
 		return
 	}
-	tree, err := r.client.Inspect(ctx, parent.SpaceKey.ValueString())
+	tree, err := r.client.Inspect(ctx, parent.SpaceID.ValueString())
 	if errors.Is(err, allot.ErrNotFound) {
 		resp.State.RemoveResource(ctx)
 		return
@@ -297,6 +315,16 @@ func (r *claimResource) Read(ctx context.Context, req resource.ReadRequest, resp
 	if savedErr == nil && automaticFits(saved, m.Result) {
 		setSelection(&m, saved)
 	}
+	storedTags, err := tree.Tags(m.ID.ValueString())
+	if err != nil {
+		resp.Diagnostics.AddError("Cannot read tags", err.Error())
+		return
+	}
+	m.Tags, m.TagsAll, err = readResourceTags(ctx, storedTags, m.Tags, m.TagsAll, r.defaultTags)
+	if err != nil {
+		resp.Diagnostics.AddError("Cannot read tags", err.Error())
+		return
+	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &m)...)
 }
 func (r *claimResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
@@ -316,24 +344,54 @@ func (r *claimResource) Delete(ctx context.Context, req resource.DeleteRequest, 
 	}
 }
 func (r *claimResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	key, id, err := importID(req.ID)
+	id, err := importID(req.ID)
 	if err != nil {
 		resp.Diagnostics.AddError("Invalid import ID", err.Error())
 		return
 	}
-	tree, err := r.client.Inspect(ctx, key)
+	spaces, err := r.client.ListSpaces(ctx)
 	if err != nil {
-		resp.Diagnostics.AddError("Cannot locate imported claim", err.Error())
+		resp.Diagnostics.AddError("Cannot list allocation spaces", err.Error())
 		return
 	}
-	a, err := tree.Describe(id)
-	if err != nil {
-		resp.Diagnostics.AddError("Cannot inspect imported claim", err.Error())
+	var tree *allot.Tree
+	var a allot.Allocation
+	for _, space := range spaces {
+		if space.Released {
+			continue
+		}
+		candidate, inspectErr := r.client.Inspect(ctx, space.ID)
+		if inspectErr != nil {
+			resp.Diagnostics.AddError("Cannot inspect allocation space", inspectErr.Error())
+			return
+		}
+		found, lookupErr := candidate.Describe(id)
+		if lookupErr == nil {
+			tree, a = candidate, found
+			break
+		}
+		if !errors.Is(lookupErr, allot.ErrNotFound) && !errors.Is(lookupErr, allot.ErrReleased) {
+			resp.Diagnostics.AddError("Cannot inspect imported claim", lookupErr.Error())
+			return
+		}
+	}
+	if tree == nil {
+		resp.Diagnostics.AddError("Cannot locate imported claim", "No live allocation has this UUID.")
 		return
 	}
 	m := claimModel{}
 	if err = fillClaim(&m, tree.Space(), a); err != nil {
 		resp.Diagnostics.AddError("Cannot import claim", err.Error())
+		return
+	}
+	storedTags, err := tree.Tags(id)
+	if err != nil {
+		resp.Diagnostics.AddError("Cannot import tags", err.Error())
+		return
+	}
+	m.Tags, m.TagsAll, err = readResourceTags(ctx, storedTags, m.Tags, m.TagsAll, r.defaultTags)
+	if err != nil {
+		resp.Diagnostics.AddError("Cannot import tags", err.Error())
 		return
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &m)...)
@@ -382,8 +440,12 @@ func automaticFits(s allot.Selection, result types.Object) bool {
 	return new(big.Int).Add(new(big.Int).Sub(end, start), big.NewInt(1)).Cmp(count) == 0
 }
 
-func (*claimResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+func (r *claimResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
 	if req.Plan.Raw.IsNull() {
+		return
+	}
+	planTagsAll(ctx, req, resp, r.defaultTags)
+	if resp.Diagnostics.HasError() {
 		return
 	}
 	var config claimModel
@@ -451,8 +513,8 @@ func (*claimResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanReq
 	}
 }
 
-// Update changes only Terraform's description of a compatible allocation. The
-// ledger retains its original selector for UUID-specific retries and recovery.
+// Update changes tags and Terraform's description of a compatible allocation.
+// The ledger retains its original selector for UUID-specific retries and recovery.
 func (r *claimResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
 	var m claimModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &m)...)
@@ -462,6 +524,16 @@ func (r *claimResource) Update(ctx context.Context, req resource.UpdateRequest, 
 	desired, err := selection(ctx, m)
 	if err != nil {
 		resp.Diagnostics.AddError("Invalid allocation request", err.Error())
+		return
+	}
+	tags, err := resourceTags(ctx, m.Tags, r.defaultTags)
+	if err != nil {
+		resp.Diagnostics.AddError("Invalid tags", err.Error())
+		return
+	}
+	m.TagsAll, err = tagsAllValue(ctx, tags)
+	if err != nil {
+		resp.Diagnostics.AddError("Invalid tags", err.Error())
 		return
 	}
 	parent, err := refFrom(ctx, m.Within)
@@ -487,8 +559,12 @@ func (r *claimResource) Update(ctx context.Context, req resource.UpdateRequest, 
 		resp.Diagnostics.AddError("Cannot describe claim", err.Error())
 		return
 	}
-	if !automaticFits(desired, m.Result) {
+	if !reflect.DeepEqual(desired, *a.Selection) && !automaticFits(desired, m.Result) {
 		resp.Diagnostics.AddError("Incompatible allocation request", "The existing allocation does not satisfy the requested capacity; replacement is required.")
+		return
+	}
+	if err := r.client.SetTags(ctx, parent.root(), m.ID.ValueString(), tags); err != nil {
+		resp.Diagnostics.AddError("Cannot update claim tags", operationError(m.ID.ValueString(), err))
 		return
 	}
 	setSelection(&m, desired)

@@ -18,13 +18,15 @@ import (
 
 type spaceResource struct{ resourceClient }
 type spaceModel struct {
-	ID     types.String `tfsdk:"id"`
-	Key    types.String `tfsdk:"key"`
-	Kind   types.String `tfsdk:"kind"`
-	CIDR   types.String `tfsdk:"cidr"`
-	Range  types.Object `tfsdk:"range"`
-	Ref    types.Object `tfsdk:"ref"`
-	Result types.Object `tfsdk:"result"`
+	ID      types.String `tfsdk:"id"`
+	Key     types.String `tfsdk:"key"`
+	Kind    types.String `tfsdk:"kind"`
+	CIDR    types.String `tfsdk:"cidr"`
+	Range   types.Object `tfsdk:"range"`
+	Ref     types.Object `tfsdk:"ref"`
+	Result  types.Object `tfsdk:"result"`
+	Tags    types.Map    `tfsdk:"tags"`
+	TagsAll types.Map    `tfsdk:"tags_all"`
 }
 type boundsModel struct {
 	Start types.String `tfsdk:"start"`
@@ -36,12 +38,14 @@ func (*spaceResource) Metadata(_ context.Context, req resource.MetadataRequest, 
 }
 func (*spaceResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{Description: "A root IPv4, IPv6 or integer allocation space.", Attributes: map[string]schema.Attribute{
-		"id":    schema.StringAttribute{Computed: true, Description: "Immutable allocation UUID.", PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()}},
-		"key":   schema.StringAttribute{Required: true, Description: "Exact root key, unique in the storage namespace. Changes require replacement.", PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()}},
-		"kind":  schema.StringAttribute{Optional: true, Computed: true, Description: "ipv4, ipv6 or integer; inferred from cidr when omitted.", PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown(), stringplanmodifier.RequiresReplaceIfConfigured()}},
-		"cidr":  schema.StringAttribute{Optional: true, Computed: true, Description: "Aligned IP prefix. For explicit bounds, computed when the range is CIDR-aligned.", PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown(), stringplanmodifier.RequiresReplaceIfConfigured()}},
-		"range": schema.SingleNestedAttribute{Optional: true, Computed: true, Description: "Inclusive bounds; inferred from cidr when omitted.", Attributes: map[string]schema.Attribute{"start": schema.StringAttribute{Required: true, Description: "Inclusive lower bound as an IP or decimal integer string."}, "end": schema.StringAttribute{Required: true, Description: "Inclusive upper bound as an IP or decimal integer string."}}, PlanModifiers: []planmodifier.Object{objectplanmodifier.UseStateForUnknown(), objectplanmodifier.RequiresReplaceIfConfigured()}},
-		"ref":   refSchema(false), "result": resultSchema(),
+		"id":       schema.StringAttribute{Computed: true, Description: "Immutable allocation UUID.", PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()}},
+		"key":      schema.StringAttribute{Optional: true, Computed: true, Description: "Optional logical key. Defaults to the root UUID; Name is an ordinary tag.", PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown(), stringplanmodifier.RequiresReplaceIfConfigured()}},
+		"kind":     schema.StringAttribute{Optional: true, Computed: true, Description: "ipv4, ipv6 or integer; inferred from cidr when omitted.", PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown(), stringplanmodifier.RequiresReplaceIfConfigured()}},
+		"cidr":     schema.StringAttribute{Optional: true, Computed: true, Description: "Aligned IP prefix. For explicit bounds, computed when the range is CIDR-aligned.", PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown(), stringplanmodifier.RequiresReplaceIfConfigured()}},
+		"range":    schema.SingleNestedAttribute{Optional: true, Computed: true, Description: "Inclusive bounds; inferred from cidr when omitted.", Attributes: map[string]schema.Attribute{"start": schema.StringAttribute{Required: true, Description: "Inclusive lower bound as an IP or decimal integer string."}, "end": schema.StringAttribute{Required: true, Description: "Inclusive upper bound as an IP or decimal integer string."}}, PlanModifiers: []planmodifier.Object{objectplanmodifier.UseStateForUnknown(), objectplanmodifier.RequiresReplaceIfConfigured()}},
+		"tags":     schema.MapAttribute{Optional: true, ElementType: types.StringType, Description: "Resource tags, including optional Name. Matching keys override provider default tags."},
+		"tags_all": schema.MapAttribute{Computed: true, ElementType: types.StringType, Description: "All stored tags, including provider defaults and resource overrides."},
+		"ref":      refSchema(false), "result": resultSchema(),
 	}}
 }
 func spaceSpec(ctx context.Context, m spaceModel, id string) (allot.Space, error) {
@@ -83,7 +87,7 @@ func (*spaceResource) ValidateConfig(ctx context.Context, req resource.ValidateC
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	if m.Key.IsUnknown() || m.Kind.IsUnknown() || m.CIDR.IsUnknown() || m.Range.IsUnknown() {
+	if m.Kind.IsUnknown() || m.CIDR.IsUnknown() || m.Range.IsUnknown() {
 		return
 	}
 	if !m.Range.IsNull() {
@@ -92,6 +96,9 @@ func (*spaceResource) ValidateConfig(ctx context.Context, req resource.ValidateC
 				return
 			}
 		}
+	}
+	if m.Key.IsNull() || m.Key.IsUnknown() {
+		m.Key = types.StringValue("00000000-0000-4000-8000-000000000001")
 	}
 	if _, err := spaceSpec(ctx, m, "00000000-0000-4000-8000-000000000001"); err != nil {
 		resp.Diagnostics.AddError("Invalid allocation space", err.Error())
@@ -121,6 +128,19 @@ func (r *spaceResource) Create(ctx context.Context, req resource.CreateRequest, 
 		return
 	}
 	id := allot.NewID()
+	if m.Key.IsNull() || m.Key.IsUnknown() {
+		m.Key = types.StringValue(id)
+	}
+	tags, err := resourceTags(ctx, m.Tags, r.defaultTags)
+	if err != nil {
+		resp.Diagnostics.AddError("Invalid tags", err.Error())
+		return
+	}
+	m.TagsAll, err = tagsAllValue(ctx, tags)
+	if err != nil {
+		resp.Diagnostics.AddError("Invalid tags", err.Error())
+		return
+	}
 	s, err := spaceSpec(ctx, m, id)
 	if err != nil {
 		resp.Diagnostics.AddError("Invalid allocation space", err.Error())
@@ -130,7 +150,7 @@ func (r *spaceResource) Create(ctx context.Context, req resource.CreateRequest, 
 		resp.Diagnostics.AddError("Cannot describe space", err.Error())
 		return
 	}
-	_, err = r.client.Create(ctx, s)
+	_, err = r.client.CreateWithTags(ctx, s, tags)
 	if err != nil {
 		if errors.Is(err, allot.ErrUncertain) {
 			resp.Diagnostics.Append(resp.State.Set(ctx, &m)...)
@@ -146,7 +166,7 @@ func (r *spaceResource) Read(ctx context.Context, req resource.ReadRequest, resp
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	tree, err := r.client.Inspect(ctx, m.Key.ValueString())
+	tree, err := r.client.Inspect(ctx, m.ID.ValueString())
 	if errors.Is(err, allot.ErrNotFound) {
 		resp.State.RemoveResource(ctx)
 		return
@@ -168,6 +188,39 @@ func (r *spaceResource) Read(ctx context.Context, req resource.ReadRequest, resp
 		resp.Diagnostics.AddError("Cannot describe space", err.Error())
 		return
 	}
+	storedTags, err := tree.Tags(m.ID.ValueString())
+	if err != nil {
+		resp.Diagnostics.AddError("Cannot read tags", err.Error())
+		return
+	}
+	m.Tags, m.TagsAll, err = readResourceTags(ctx, storedTags, m.Tags, m.TagsAll, r.defaultTags)
+	if err != nil {
+		resp.Diagnostics.AddError("Cannot read tags", err.Error())
+		return
+	}
+	resp.Diagnostics.Append(resp.State.Set(ctx, &m)...)
+}
+func (r *spaceResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
+	var m spaceModel
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &m)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	tags, err := resourceTags(ctx, m.Tags, r.defaultTags)
+	if err != nil {
+		resp.Diagnostics.AddError("Invalid tags", err.Error())
+		return
+	}
+	m.TagsAll, err = tagsAllValue(ctx, tags)
+	if err != nil {
+		resp.Diagnostics.AddError("Invalid tags", err.Error())
+		return
+	}
+	ref := allot.SpaceRef{Key: m.Key.ValueString(), ID: m.ID.ValueString()}
+	if err := r.client.SetTags(ctx, ref, ref.ID, tags); err != nil {
+		resp.Diagnostics.AddError("Cannot update space tags", operationError(ref.ID, err))
+		return
+	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &m)...)
 }
 func (r *spaceResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
@@ -182,16 +235,19 @@ func (r *spaceResource) Delete(ctx context.Context, req resource.DeleteRequest, 
 	}
 }
 func (r *spaceResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	key, id, err := importID(req.ID)
+	id, err := importID(req.ID)
 	if err != nil {
 		resp.Diagnostics.AddError("Invalid import ID", err.Error())
 		return
 	}
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), id)...)
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("key"), key)...)
 }
-func (*spaceResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
-	if req.Plan.Raw.IsNull() || len(resp.RequiresReplace) == 0 {
+func (r *spaceResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	if req.Plan.Raw.IsNull() {
+		return
+	}
+	planTagsAll(ctx, req, resp, r.defaultTags)
+	if resp.Diagnostics.HasError() || len(resp.RequiresReplace) == 0 {
 		return
 	}
 	var config spaceModel
